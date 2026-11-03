@@ -1,0 +1,208 @@
+import maya.cmds as cmds
+
+GRP_NAME = "CTL_GRP_TEMP"
+
+
+# ---------------------------------------------------------------
+# 1. Create CTLS
+# Goes through each node in the Outliner one by one. If it is a joint, then creates a curve with a corresponding name. 
+# If there are no joints in your scene, the output will say "No joints found in the scene."
+# ADJUST YOUR CTL TRANSFORMATIONS AFTER THIS STEP
+# ---------------------------------------------------------------
+def circles_on_joints():
+    nodes = cmds.ls(dag=True, long=True)
+
+    if cmds.objExists(GRP_NAME):
+        grp = GRP_NAME
+    else:
+        grp = cmds.group(empty=True, name=GRP_NAME)
+
+    count = 0
+    for node in nodes:
+        if cmds.objectType(node) == "joint":
+            short_name = node.split("|")[-1]
+            circle = cmds.circle(name=short_name + "_CTL", normal=(0, 1, 0), radius=1)[0]
+            cmds.matchTransform(circle, node)
+            cmds.parent(circle, grp)
+            count += 1
+
+    if count:
+        print("Created " + str(count) + " circle(s) in " + grp + ".")
+    else:
+        cmds.warning("No joints found in the scene.")
+
+
+# ---------------------------------------------------------------
+# 2. Add EXTRAS
+# This puts each curve inside a group node, and gets rid of the transforms on the Curves themselves
+# If you want to parent any control to something else, use the EXTRA node as a target
+# ---------------------------------------------------------------
+def add_extra_groups():
+    if not cmds.objExists(GRP_NAME):
+        cmds.warning(GRP_NAME + " not found. Click Create CTLS first.")
+        return
+
+    ctls = cmds.listRelatives(GRP_NAME, children=True, type="transform", fullPath=True) or []
+
+    count = 0
+    for ctl in ctls:
+        short_name = ctl.split("|")[-1]
+
+        if short_name.endswith("_EXTRA"):
+            continue
+
+        extra = cmds.group(empty=True, name=short_name + "_EXTRA")
+        cmds.matchTransform(extra, ctl)
+        cmds.parent(ctl, extra)
+        cmds.parent(extra, GRP_NAME)
+        count += 1
+
+    print("Created " + str(count) + " _EXTRA group(s).")
+
+
+# ---------------------------------------------------------------
+# 3. Freeze Transforms (translate + scale, rotation left alone)
+# Freezes all transforms on the CTLS themselves, and Translation and Scale values on all EXTRA nodes
+# ---------------------------------------------------------------
+def freeze_group_contents():
+    if not cmds.objExists(GRP_NAME):
+        cmds.warning(GRP_NAME + " not found.")
+        return
+
+    nodes = cmds.listRelatives(GRP_NAME, allDescendents=True, type="transform", fullPath=True) or []
+    nodes.sort(key=lambda n: n.count("|"))   # parents before children
+
+    if not nodes:
+        cmds.warning("Nothing found inside " + GRP_NAME + ".")
+        return
+
+    pivots = {}
+    for node in nodes:
+        rp = cmds.xform(node, query=True, worldSpace=True, rotatePivot=True)
+        sp = cmds.xform(node, query=True, worldSpace=True, scalePivot=True)
+        pivots[node] = (rp, sp)
+
+    for node in nodes:
+        cmds.delete(node, constructionHistory=True)
+
+    for node in nodes:
+        cmds.makeIdentity(node, apply=True, translate=True, rotate=False, scale=True, normal=0)
+
+    for node in nodes:
+        rp, sp = pivots[node]
+        cmds.xform(node, worldSpace=True, rotatePivot=rp)
+        cmds.xform(node, worldSpace=True, scalePivot=sp)
+
+    print("Froze translate and scale on " + str(len(nodes)) + " node(s).")
+
+
+# ---------------------------------------------------------------
+# 4. Hierarchy
+# This will mimic your joint Hierarchy
+# ---------------------------------------------------------------
+def build_ctl_hierarchy():
+    if not cmds.objExists(GRP_NAME):
+        cmds.warning(GRP_NAME + " not found.")
+        return
+
+    joints = cmds.ls(type="joint", long=True)
+
+    count = 0
+    for joint in joints:
+        short_name = joint.split("|")[-1]
+        extra = short_name + "_CTL_EXTRA"
+
+        if not cmds.objExists(extra):
+            continue
+
+        parent_joint = cmds.listRelatives(joint, parent=True, type="joint", fullPath=True)
+        if not parent_joint:
+            continue
+
+        parent_short = parent_joint[0].split("|")[-1]
+        parent_ctl = parent_short + "_CTL"
+
+        if not cmds.objExists(parent_ctl):
+            continue
+
+        current_parent = cmds.listRelatives(extra, parent=True, fullPath=True)
+        target = cmds.ls(parent_ctl, long=True)[0]
+        if current_parent and current_parent[0] == target:
+            continue
+
+        cmds.parent(extra, parent_ctl)
+        count += 1
+
+    print("Parented " + str(count) + " group(s) to match the joint hierarchy.")
+
+
+# ---------------------------------------------------------------
+# 5. Parent (parent + scale constrain each joint to its CTL)
+# This will connect your CTLS to your JNT
+# Make sure there is no animation in this file and that no joints are already parented
+# ---------------------------------------------------------------
+def constrain_joints_to_ctls():
+    joints = cmds.ls(type="joint", long=True)
+
+    count = 0
+    for joint in joints:
+        short_name = joint.split("|")[-1]
+        ctl = short_name + "_CTL"
+
+        # No control for this joint? Skip it.
+        if not cmds.objExists(ctl):
+            continue
+
+        # Already constrained? Skip it (safe to re-run).
+        existing = cmds.listRelatives(joint, children=True, type="parentConstraint") or []
+        if existing:
+            continue
+
+        cmds.parentConstraint(ctl, joint, maintainOffset=True)
+        cmds.scaleConstraint(ctl, joint, maintainOffset=True)
+        count += 1
+
+    if count:
+        print("Constrained " + str(count) + " joint(s) to their CTLs.")
+    else:
+        cmds.warning("No joints were constrained (no matching _CTL found, or already constrained).")
+
+
+# ---------------------------------------------------------------
+# Undo wrapper: makes each button one undo step
+# ---------------------------------------------------------------
+def run_undoable(func):
+    cmds.undoInfo(openChunk=True)
+    try:
+        func()
+    finally:
+        cmds.undoInfo(closeChunk=True)
+
+
+# ---------------------------------------------------------------
+# UI
+# ---------------------------------------------------------------
+def show_ctl_builder_ui():
+    win = "ctlBuilderWin"
+    if cmds.window(win, exists=True):
+        cmds.deleteUI(win)
+
+    cmds.window(win, title="CTL Builder", widthHeight=(260, 250), sizeable=True)
+    cmds.columnLayout(adjustableColumn=True, rowSpacing=6, columnOffset=("both", 10))
+    cmds.separator(height=6, style="none")
+
+    cmds.button(label="Create CTLS", height=30,
+                command=lambda *args: run_undoable(circles_on_joints))
+    cmds.button(label="Add EXTRAS", height=30,
+                command=lambda *args: run_undoable(add_extra_groups))
+    cmds.button(label="Freeze Transforms", height=30,
+                command=lambda *args: run_undoable(freeze_group_contents))
+    cmds.button(label="Hierarchy", height=30,
+                command=lambda *args: run_undoable(build_ctl_hierarchy))
+    cmds.button(label="Parent", height=30,
+                command=lambda *args: run_undoable(constrain_joints_to_ctls))
+
+    cmds.showWindow(win)
+
+
+show_ctl_builder_ui()
